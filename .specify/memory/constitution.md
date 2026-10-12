@@ -1,26 +1,3 @@
-<!--
-Sync Impact Report
-- Version change: (unfilled template) → 1.0.0 (initial adoption).
-- Source: answers in docs/constitution-open-questions.md (2026-10-05), and the ratified UI
-  constitution, budget-app/.specify/memory/constitution.md (v1.2.0).
-- Modified principles: none (all placeholders replaced).
-- Added principles: I. Financial Correctness (NON-NEGOTIABLE); II. Non-Blocking Reactive I/O
-  (NON-NEGOTIABLE); III. Dates and Time; IV. Contract-First API; V. Persistence and Data
-  Integrity; VI. Security and Privacy; VII. Domain Logic and Code Organization; VIII. Budget
-  Domain Rules; IX. Test-First Domain Logic; X. Performance and Resilience; XI. Observability and
-  Operations.
-- Added sections: Relationship to the UI and Technology Constraints; Development Workflow and
-  Quality Gates; Governance.
-- Removed sections: none.
-- Left out by decision (N/A or deferred to specs): 0.3 currency scope, 0.6/1.4/2.2/2.3 undo/redo,
-  0.17 v1 scope, 3.7 streaming, 4.10 pool sizing, 5.6 pagination details, 6.4 rate limiting,
-  7.4 immutability, 8.6 load tests, PIT mutation testing.
-- Interpretation to confirm: 5.7 "Return HTTP 409 on conflict" is read as a create whose
-  client-supplied ID already belongs to a different record.
-- Templates: plan-template.md "Constitution Check" reads this file at runtime; no template edits.
-- Deferred TODOs: RATIFICATION_DATE is set when the owner approves this version (answer 13.3).
--->
-
 # BudgIT API Constitution
 
 This constitution governs the BudgIT API (the Java service in this repository). The BudgIT UI
@@ -32,24 +9,31 @@ contract amends both constitutions.
 
 ### I. Financial Correctness (NON-NEGOTIABLE)
 
-- Money MUST be integer cents in API payloads and stored as Postgres `BIGINT`. Floating-point
-  dollar values MUST NOT be used for money anywhere.
-- In Java, money MUST be a `Money` record (`long cents`, `Currency currency`) with
-  overflow-checked arithmetic (`Math.addExact` and similar). A raw `long` MUST NOT represent
-  money in domain signatures. JSON sends amounts as integer cents with an explicit `currency`
-  field.
+- Money MUST be an integer in the currency's minor unit in API payloads, stored as Postgres
+  `BIGINT`. Floating-point values MUST NOT be used for money anywhere.
+- Each budget has a single currency, an ISO 4217 code sent to the UI as a user setting. The API
+  defines the allowed currencies and sends each with its decimal shift: the number of places the
+  decimal point moves to turn a stored integer into the displayed amount (e.g. 2 for USD, where
+  amounts are stored in cents). Clients MUST NOT assume a shift. Whether a budget's currency can
+  change is decided by a feature spec.
+- In Java, money MUST be a `Money` record (`long minorUnits`, `Currency currency`) with
+  overflow-checked arithmetic (`Math.addExact` and similar). Arithmetic across different
+  currencies MUST fail. A raw `long` MUST NOT represent money in domain signatures. JSON sends
+  amounts as integers in minor units with an explicit `currency` field.
 - Amounts are signed: inflows positive, outflows negative, in the API and the database. How they
   are displayed is the UI's decision.
 - Transactions and category assignments are the only source of truth. Account balances and
-  Amount to Assign MUST be computed by the API with database aggregates.
+  Amount to Assign MUST be computed by the API from database aggregates: SQL sums transactions
+  and assignments, and pure domain functions (Principle VII) apply rules such as month rollover
+  to those sums.
 - A cache or stored total MAY be added only for a measured need. It MUST be updated in the same
   database transaction as the write that changes it, and MUST be verifiable by recomputing it
   from transactions.
 - Every write MUST return the server's values (updated records, recomputed totals, new versions)
   computed in the same database transaction as the write.
 
-**Rationale**: A budgeting app that is off by a cent loses the user's trust. Integer cents, one
-money type and totals derived from a single source of truth remove whole classes of bugs.
+**Rationale**: A budgeting app that is off by a cent loses the user's trust. Integer minor units,
+one money type and totals derived from a single source of truth remove whole classes of bugs.
 
 ### II. Non-Blocking Reactive I/O (NON-NEGOTIABLE)
 
@@ -140,9 +124,9 @@ spec as the source of truth, and testing against it, keeps both sides in step.
   on a major version both support, and keep connection details in config, so a move needs no code
   changes. Local development and CI use the same major version in Docker.
 - All request-path database access runs over R2DBC with `r2dbc-pool`. Spring Data R2DBC
-  repositories are used for simple single-table CRUD. Aggregates (balances, Amount to Assign) and
-  performance-sensitive queries use hand-written SQL through `DatabaseClient`, or `@Query` for
-  simple cases. jOOQ over R2DBC is an allowed alternative if type-checked SQL becomes worth it.
+  repositories are used for simple single-table CRUD. Aggregate queries (e.g. account balances
+  and the per-category, per-month sums behind Amount to Assign) and performance-sensitive queries
+  use hand-written SQL through `DatabaseClient`, or `@Query` for simple cases. jOOQ over R2DBC is an allowed alternative if type-checked SQL becomes worth it.
 - Transactions are declared with `@Transactional` on public service methods, or
   `TransactionalOperator` when only part of a pipeline should be transactional. Each user action
   MUST be one database transaction covering the change and the totals returned in the response.
@@ -174,7 +158,8 @@ financial data consistent through concurrent edits, retries and deploys.
 - The Next.js server is the API's only caller (backend-for-frontend). It forwards requests with
   `Authorization: Bearer <access token>`. The API is not reachable from the browser, so it handles
   no cookies, CSRF or CORS. CSRF protection is enforced by Next.js, which also maps the API's 401
-  to the browser redirect to `/login`.
+  to the browser redirect to `/login`, except a 401 with code `USER_NOT_PROVISIONED` (sign-up not
+  yet finished), which the UI shows as a "finishing setup, try again" message.
 - Sessions are owned by the Next.js server (UI constitution §VI). The API never sees the session
   ID; it receives only the bearer token.
 - The API is a Spring Security WebFlux OAuth2 resource server. It MUST validate Cognito JWT access
@@ -295,14 +280,15 @@ tests against real Postgres catch them before users do.
   the API.
 - Latency targets at the sizing targets (p95): under 150 ms for a budget-month read, under 100 ms
   for a transactions page, and under 150 ms for a write including recomputed totals.
-- Each query MUST be designed with its indexes and checked with `EXPLAIN` in review. Aggregates
-  MUST be computed in SQL, never by loading rows into Java. Cached totals are allowed only as in
+- Each query MUST be designed with its indexes and checked with `EXPLAIN` in review. Sums
+  MUST be computed in SQL. Individual transactions or assignments MUST NOT be loaded into Java to
+  total them; only the aggregated results are. Cached totals are allowed only as in
   Principle I.
 - Every outbound call has a timeout. Retries, with backoff and jitter, are allowed only for
   idempotent calls.
-- When CSV import is implemented, the file is uploaded to the API and parsed as a stream, with a
-  size limit (e.g. 5 MB / 10k rows), duplicate detection by a per-row fingerprint, and the whole
-  import written in one database transaction.
+- CSV imports are uploaded to the API and parsed as a stream, with a size limit (e.g. 5 MB / 10k
+  rows), duplicate detection by a per-row fingerprint, and the whole import written in one
+  database transaction.
 - Netty and connection-pool settings start at defaults and MAY be tuned when performance tests
   show a problem.
 
@@ -328,12 +314,19 @@ tests against real Postgres catch them before users do.
 **Rationale**: Request IDs and structured logs make problems traceable without ever recording the
 financial data the app exists to protect.
 
-## Relationship to the UI and Technology Constraints
+## Scope, Relationship to the UI and Technology Constraints
 
+- **Product**: the API for BudgIT, a personal, zero-based budgeting web app for one user per
+  budget, covering monthly budgeting, targets, accounts and transactions.
+- **Not supported**: shared or multi-user budgets, investments, more than one currency in a
+  budget, currency conversion, and server push of changes (Server-Sent Events or WebSockets).
+  Adding any of these requires amending this constitution and the UI constitution.
+- **Feature order**: which features are built, and when, is decided by feature specs and the
+  backlog, not by this constitution.
 - **Relationship to the UI constitution**: the UI constitution defines the contract the UI relies
-  on; this constitution governs how the API fulfills it. A change to that contract (integer cents,
-  computed totals, date formats, write responses, versions, generated types, authorization,
-  privacy, sample data, sizing, workflow and governance) amends both.
+  on; this constitution governs how the API fulfills it. A change to that contract (money in minor
+  units and currency, computed totals, date formats, write responses, versions, generated types,
+  authorization, privacy, sample data, sizing, workflow and governance) amends both.
 - **Stack**: Java 25, Spring Boot 4.x (latest GA, Spring Framework 7), Spring WebFlux on Netty,
   Project Reactor, Spring Security (OAuth2 resource server), R2DBC with `r2dbc-pool`, PostgreSQL,
   Flyway, and Amazon Cognito (OIDC) for identity. Spring Boot minor versions are upgraded within a

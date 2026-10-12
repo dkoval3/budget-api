@@ -23,7 +23,7 @@ These are already ratified on the UI side. The API constitution should restate t
 
 | # | Requirement (source) | Your answer |
 | --- | --- | --- |
-| 0.1 | Money is integer cents in API payloads; floating-point dollars are never used. (UI §I) | Confirm |
+| 0.1 | Money is integer cents in API payloads; floating-point dollars are never used. (UI §I) | Superseded by the UI constitution (2026-10-11): money is an integer in the currency's minor unit; floating-point values are never used. Each budget has one currency, sent as a user setting (ISO 4217 code). The API defines the allowed currencies and sends each with its decimal shift (e.g. 2 for USD, stored in cents); clients never assume one. More than one currency in a budget and currency conversion are not supported. Whether a user can change a budget's currency is left to a feature spec. |
 | 0.2 | Transactions and category assignments are the only source of truth. Account balances and Amount to Assign are computed by the API, and every write returns the server's values. (UI §I) | Confirm |
 | 0.3 | Only USD in v1, but currency is not hard-coded outside the money type, so more currencies can be added later. (UI §I, Scope) | Not applicable for constitution. We can define in the v1 feature spec |
 | 0.4 | Calendar days (e.g. transaction dates) are `YYYY-MM-DD` with no timezone and are never converted. Moments (`created_at`, `updated_at`, import time) are ISO 8601 UTC strings. A budget month is one `YYYY-MM` value. (UI §II) | Confirm |
