@@ -207,9 +207,11 @@ financial data consistent through concurrent edits, retries and deploys.
   and read at startup, overridden by AWS AppConfig. Secrets come from environment variables or AWS
   Secrets Manager and MUST NOT be committed. Config is loaded into `@Validated`
   `@ConfigurationProperties` classes, and the API MUST refuse to start if a value is missing or
-  points at `localhost` outside development.
-- Startup validation MUST refuse a non-Cognito token issuer in every environment except the test
-  environment. There is no test-only auth bypass.
+  points at `localhost` outside the `local` and `test` environments.
+- Startup validation MUST refuse a configured trusted token issuer that is not a Cognito issuer
+  in every environment except `local` and `test`, where a mock OIDC server stands in for Cognito
+  (Principle IX). Tokens from the mock server are still real, signed tokens validated the same
+  way; there is no test-only auth bypass.
 - Dependencies MUST be scanned for known vulnerabilities in CI on every pull request and on a
   schedule against `main`, failing on high or critical findings. The deployed Docker image is
   scanned too. Automated update PRs (e.g. Dependabot) keep dependencies current. Suppressing a
@@ -396,5 +398,4 @@ financial data the app exists to protect.
 - Every plan's Constitution Check and every pre-merge self-review MUST verify compliance with these
   principles. Any deviation MUST be justified in the plan's Complexity Tracking table.
 
-**Version**: 1.0.0 | **Ratified**: 2026-10-12
-v1.0.0 | **Last Amended**: 2026-10-12
+**Version**: 1.0.1 | **Ratified**: 2026-10-12 | **Last Amended**: 2026-10-12
