@@ -1,0 +1,37 @@
+openapi: 3.1.0
+info:
+  title: BudgIT Internal API
+  version: 1.0.0
+  description: |
+    Internal contract for service callers (API constitution §VI). NOT published to the UI and
+    NOT reachable publicly. Every operation lives under `/internal/v1`, requires a Cognito
+    client-credentials token from a registered service app client, and declares the one scope
+    it needs. User tokens are rejected.
+
+    The platform skeleton defines no operations; the first one (user provisioning, scope
+    `budgit/provision-user`) is added by the Users and auth spec.
+
+    Shared components (Problem, headers, error responses) are referenced from the public
+    contract so there is one definition.
+servers:
+  - url: /
+paths: {}
+components:
+  securitySchemes:
+    cognitoService:
+      type: oauth2
+      description: Cognito client-credentials token (`token_use=access`) for a service app client.
+      flows:
+        clientCredentials:
+          tokenUrl: https://example.invalid/oauth2/token
+          scopes:
+            budgit/provision-user: Provision a user and their budget (added by the Users and auth spec).
+  responses:
+    Unauthenticated:
+      $ref: './budgit-api.yaml#/components/responses/Unauthenticated'
+    BadRequest:
+      $ref: './budgit-api.yaml#/components/responses/BadRequest'
+    InternalError:
+      $ref: './budgit-api.yaml#/components/responses/InternalError'
+    ServiceUnavailable:
+      $ref: './budgit-api.yaml#/components/responses/ServiceUnavailable'
