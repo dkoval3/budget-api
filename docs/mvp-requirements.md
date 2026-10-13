@@ -1,6 +1,6 @@
 # BudgIT API — MVP Requirements
 
-Oct 11, 2026 · @Dane
+Oct 12, 2026 · @Dane
 
 This document defines what the first usable version (MVP) of the BudgIT API must do, and what it
 deliberately leaves out. It is the input for the first Spec Kit specs in this repository; it does
@@ -10,7 +10,7 @@ spec is the contract.
 **Sources:**
 
 1. The API constitution, `.specify/memory/constitution.md` (v1.0.0, cited as "API §I" etc.).
-2. The UI constitution, `budget-app/.specify/memory/constitution.md` (v1.2.0, cited as "UI §I").
+2. The UI constitution, `budget-app/.specify/memory/constitution.md` (v1.0.0, cited as "UI §I").
 3. The current UI code in `budget-app/src`. It predates the UI constitution and will change, so it
    is used as evidence of which features the MVP needs, not of data shapes. Notably, the UI already
    marks undo/redo, "Recent Moves", budget filters and profile/budget settings as "not part of the
@@ -49,20 +49,39 @@ Requirement IDs (e.g. `USR-1`) are for referencing from specs and tasks.
 
 - **USR-1** A user record is provisioned from the identity provider's sign-up confirmation event,
   idempotently, with an internal user ID mapped to the Cognito `sub` (API §VI). A Lambda triggered
-  by the event calls an internal provisioning endpoint. That endpoint is not publicly reachable,
-  is authenticated with IAM or a shared secret (not a user token), and is not part of the
-  published OpenAPI contract the UI uses (Q5).
-- **USR-2** Provisioning also creates the user's single budget, with its own budget ID, and its
-  default user settings. The budget starts with no category groups; system categories (Ready to
-  Assign, credit card payment categories) are created automatically as needed.
+  by the event calls an internal provisioning endpoint as a service caller (API §VI): it
+  authenticates with a Cognito client-credentials token carrying a provisioning scope. The
+  endpoint is not publicly reachable and is described in the internal OpenAPI spec, not the
+  contract published to the UI. Because provisioning is idempotent, the Lambda MAY retry it
+  automatically (Q5).
+- **USR-2** Provisioning also creates the user's single budget, with its own budget ID, its
+  currency (CUR-1), and its default user settings. The budget starts with no category groups;
+  system categories (Ready to Assign, credit card payment categories) are created automatically as
+  needed.
 - **USR-3** Every request is authenticated as a Cognito access token and resolves to the internal
   user. A valid token for a user that has not been provisioned yet (e.g. the sign-up event is
   delayed) returns 401 with code `USER_NOT_PROVISIONED`, so the UI can show a "finishing setup,
-  try again" message instead of sending the user back to sign-in (Q4).
-- **USR-4** User settings can be read and updated. The MVP has one setting: the profile timezone
+  try again" message instead of sending the user back to sign-in. The Next.js server checks this
+  code before refreshing tokens or redirecting, so it never loops on it (Q4, API §VI, UI §VI).
+- **USR-4** User settings can be read and updated. The MVP has two settings: the profile timezone
   (`ZoneId`), used to decide "today" and the current budget month for target progress
-  (API §III, §VIII). Provisioning leaves it unset; the UI sends the browser's timezone on first
-  sign-in and the API stores it once. After that it changes only when the user edits it (Q8).
+  (API §III, §VIII), and the budget's currency (CUR-2), which is read-only in the MVP.
+  Provisioning sets the timezone to UTC. The UI sends the browser's timezone on first sign-in and
+  the API stores it once, replacing the UTC default; after that it changes only when the user
+  edits it (Q8). Until the browser's timezone arrives, everything that depends on "today" uses
+  UTC.
+
+### 2.1a Currency
+
+- **CUR-1** The API's list of allowed currencies contains only `USD` in the MVP. Every budget is
+  created with `USD` as its single currency (API §I).
+- **CUR-2** The settings response includes the budget's currency as an ISO 4217 code and its
+  decimal shift (`2` for `USD`). The UI formats amounts from these values and never assumes a
+  shift (API §I, UI §I).
+- **CUR-3** A budget's currency cannot be changed in the MVP. Whether it can change later is
+  decided by a feature spec (API §I).
+- **CUR-4** Every amount in the API is an integer in the currency's minor unit, sent with the
+  budget's currency. Writes whose currency is not the budget's currency are rejected with 422.
 
 ### 2.2 Category groups and categories
 
@@ -90,7 +109,9 @@ Requirement IDs (e.g. `USR-1`) are for referencing from specs and tasks.
   and assignments.
 - **BUD-2a** Budget months can be read and assigned from the month the budget was created up to 12
   months after the current month (in the user's timezone). Requests outside that range are
-  rejected with 422 (Q9).
+  rejected with 422 (Q9). Transactions may still be dated before the creation month (e.g.
+  back-entered history or an account's starting balance). They are kept with their real date, but
+  for budgeting they count in the creation month, as if they happened then.
 - **BUD-3** Set the assigned amount for one category in one month (absolute value, version
   checked). The UI's "Assign X to category" popup is a client-side convenience that sends the new
   absolute value. The response returns the updated category, its group subtotal and the new
@@ -98,16 +119,17 @@ Requirement IDs (e.g. `USR-1`) are for referencing from specs and tasks.
 - **BUD-4** Amount to Assign follows API §VIII: "Ready to Assign" inflows add to it, assignments in
   any month subtract from it, a category's available amount rolls into the next month, and cash
   overspending in a category reduces the next month's Amount to Assign.
-  Amount to Assign MAY go negative, for example when the user assigns more than is available or
-  when a credit account's opening debt reduces it (ACC-1a). The API allows this: it does not
-  reject the write, and it returns the negative value as is without clamping it to zero. The UI
-  is responsible for informing the user of the problem (e.g. highlighting the negative amount).
+  Amount to Assign MAY go negative, for example when the user assigns more than is available, or
+  when an uncategorized transaction or a credit account's opening debt reduces it (TXN-2a,
+  ACC-1a). The API allows this: it does not reject the write, and it returns the negative value
+  as is without clamping it to zero. The UI is responsible for informing the user of the problem
+  (e.g. highlighting the negative amount) (API §VIII).
 - **BUD-5** Totals are computed on every read and are never stored in the MVP. SQL returns
   per-category, per-month aggregates (assigned and activity), never individual transactions, and a
   pure domain function applies rollover and the cash-overspending rule to produce carryover,
   available and Amount to Assign (API §I, §VII, §X).
-- **BUD-6** A benchmark integration test, seeded at the sizing targets with five years of history,
-  checks the budget-month read and a write against the p95 targets in API §X. If it fails, a
+- **BUD-6** A benchmark integration test, seeded with a data volume chosen in the budget-months
+  spec, checks the budget-month read and a write against the p95 targets in API §X. If it fails, a
   per-category-per-month summary table is added as allowed by API §I.
 
 ### 2.4 Targets
@@ -122,20 +144,18 @@ Requirement IDs (e.g. `USR-1`) are for referencing from specs and tasks.
 
 ### 2.5 Accounts
 
-- **ACC-1** Create an account with a name, a type (`CASH` or `CREDIT`) and a starting balance. The
-  starting balance is recorded as a transaction: for a cash account it is an inflow to Ready to
-  Assign; for a credit account see ACC-1a.
+- **ACC-1** Create an account with a name, a type (`CASH` or `CREDIT`), a starting balance and an
+  optional starting-balance date. The starting balance is recorded as a transaction dated with
+  that date, or with the account's creation date (in the user's timezone) if none is sent. A date
+  before the budget's creation month counts in the creation month (BUD-2a). For a cash account
+  the transaction is an inflow to Ready to Assign; for a credit account see ACC-1a.
 - **ACC-1a** A credit account's starting balance is recorded as a negative opening transaction
   with no category and a note telling the user to select the category the debt should be paid
-  from (Q7):
-    - While the opening transaction has no category, it reduces Amount to Assign by the debt
-      amount.
-    - Once the user selects a category, it reduces that category's available amount by the debt
-      amount instead.
+  from (Q7). It follows the uncategorized-transaction rule (TXN-2a):
+    - While it has no category, it reduces Amount to Assign by the debt amount.
+    - Once the user selects a category, it reduces that category's available amount instead.
     - Either way, the same amount moves into the card's payment category, so it is set aside to
       pay the card, as with normal credit card spending (TXN-4).
-    - Amount to Assign may go negative as a result. The API returns the negative value as is and
-      never clamps it to zero; the UI highlights it.
     - Paying the debt down is budgeted through the card's payment category (ACC-2).
 - **ACC-2** Creating a credit account creates its credit card payment category (API §VIII).
 - **ACC-3** Rename an account.
@@ -145,10 +165,18 @@ Requirement IDs (e.g. `USR-1`) are for referencing from specs and tasks.
 ### 2.6 Transactions
 
 - **TXN-1** List an account's transactions, newest first. The response is a page object; in the
-  MVP a single page contains everything (API §X).
+  MVP a single page contains everything, since MVP accounts are small (API §X).
 - **TXN-2** Create, update and delete a transaction: date (`YYYY-MM-DD`), payee (free text),
-  category (by ID, including Ready to Assign for inflows), memo, and signed amount in cents
-  (inflows positive, outflows negative; API §I). Category is required except for transfers.
+  optional category (by ID, including Ready to Assign for inflows), memo, and signed amount in the
+  currency's minor unit (inflows positive, outflows negative; API §I). Transfers never have a
+  category (TXN-5). For other transactions, see TXN-2a.
+- **TXN-2a** A transaction without a category is not rejected. It counts against Ready to Assign:
+  an uncategorized outflow reduces Amount to Assign by its amount, and an uncategorized inflow adds
+  to it, exactly as if it were categorized as Ready to Assign. Once the user picks a category, the
+  amount comes from (or goes to) that category instead. On a credit account, an uncategorized
+  outflow also moves the same amount into the card's payment category (TXN-4). Amount to Assign may
+  go negative as a result (BUD-4). The UI is responsible for flagging uncategorized transactions
+  (e.g. highlighting the category cell with "Assign a category").
 - **TXN-3** The client may supply the transaction ID on create (API §V).
 - **TXN-4** Spending on a credit account moves money from the spending category to that card's
   payment category (API §VIII).
@@ -174,7 +202,8 @@ These are needed for the MVP because the constitution makes them gates for any f
 - **PLT-6** Config files, AppConfig, Secrets Manager and startup validation (API §VI).
 - **PLT-7** Structured JSON logs to stdout, the log privacy test, Micrometer metrics, OpenTelemetry
   traces, and health/info on a separate management port (API §XI).
-- **PLT-8** Docker image; Docker Compose stack (Postgres, API, UI, mock OIDC) used for local
+- **PLT-8** Docker image; Docker Compose stack (Postgres, API, UI, and a mock OIDC server that
+  also supports the client-credentials flow for service callers) used for local
   development and the cross-repo E2E suite; a dev-only seed (API §IX).
 - **PLT-9** GitHub Actions running `./mvnw verify` with every gate in the constitution, plus
   dependency and image scanning (API §VI, Workflow).
@@ -192,19 +221,23 @@ These are needed for the MVP because the constitution makes them gates for any f
 | Snoozing targets | Only appears in the commented-out filters | Later spec |
 | Age of Money | Hard-coded in the UI | Later spec |
 | Split transactions | No UI for it; the rule stays in the constitution for when it's built | Later spec |
-| CSV import | Not in the UI; out of v1 in both constitutions (Q1) | Import spec |
+| CSV import | Not in the UI; feature order is decided by specs, not the constitutions (Q1) | Import spec |
 | Bank linking and automatic imports (`linked` flag) | The goal after v1 | Bank linking spec |
 | Deleting or closing financial accounts | No UI for it | Later spec |
 | Deleting the user account and all data | Not needed while the owner is the only user; required before anyone else signs up (API §VI, Q2) | Before public launch |
 | Drag-and-drop reordering | No UI for it; sort keys are in the schema | Later spec |
 | Payee management and autocomplete | Payee is free text in the UI | Later spec |
 | Cleared/reconciled status | The UI's `checked` flag is row selection, not cleared status | Later spec |
-| Transaction search, filters, sorting and real paging | MVP returns one page (API §X) | When performance requires it |
+| Transaction search, filters and sorting | Not in the UI | Later spec |
+| Paging transaction lists | MVP accounts are small, so one page is enough; whether, when and how to page (and the threshold) is left open (API §X) | Later spec |
 | Scheduled or recurring transactions | Not in the UI | Later spec |
 | Budget settings and account settings beyond timezone | Commented out in the UI | Later spec |
-| Multiple budgets per user, shared budgets | Out of v1 (UI Scope); budget IDs keep the door open | Later |
-| Multiple currencies, investments | Out of v1 (UI Scope); `currency` is always `USD` | Later |
-| Server push (SSE/WebSockets) and streaming responses | Out of v1 (UI Scope) | Later |
+| Multiple budgets per user | Not in the MVP; budget IDs keep the door open (API §VI) | Later spec |
+| Shared or multi-user budgets | Not supported by either constitution | Requires amending both |
+| Currencies other than `USD`, changing a budget's currency | The allowed-currency list is `[USD]` (CUR-1, CUR-3); more than one currency in a budget is not supported by either constitution | Later spec |
+| Investments | Not supported by either constitution | Requires amending both |
+| Server push (SSE/WebSockets) | Not supported by either constitution | Requires amending both |
+| Streaming responses | Not in the MVP; every endpoint returns one JSON document | Later spec |
 | Rate limiting, `Idempotency-Key`, read replicas, cached totals, RLS policies | Deferred by the constitution until needed | Amendments or specs |
 | Load tests and a staging environment | Deferred by your answers (8.6, 10.6) | Later |
 
@@ -214,7 +247,9 @@ These follow from the constitutions; listed here so the UI specs can reference t
 
 - Address groups, categories, accounts and transactions by ID instead of array index
   (`useBudget`, `UndoRedoUtil`, `ManualTab`).
-- Use integer cents instead of float dollars (sample data uses values like `143.23`).
+- Use integers in the currency's minor unit instead of float dollars (sample data uses values
+  like `143.23`), and format them with the currency and decimal shift from the settings response
+  (CUR-2).
 - Use `YYYY-MM-DD` and `YYYY-MM` strings instead of `Date` objects and separate month/year state
   (`Transaction.date`, `Target.due`, `currentMonth`/`currentYear`).
 - Send signed amounts (sample transactions store outflows as positive numbers).
@@ -231,10 +266,15 @@ These follow from the constitutions; listed here so the UI specs can reference t
   (BUD-4).
 - Show the opening-debt note on a new credit account and let the user pick the category the
   debt is paid from (ACC-1a).
+- Flag uncategorized transactions, e.g. by highlighting the category cell with "Assign a
+  category" (TXN-2a).
 
 ## 5. Decisions
 
-These were open questions; the answers are folded into the requirements above.
+These were open questions; the answers are folded into the requirements above. Later changes:
+Q1 and Q3 were resolved differently in the constitutions (scope and feature order are left to
+specs, and the E2E rule covers every critical flow); Q5 now uses Cognito client credentials
+instead of IAM or a shared secret (API §VI).
 
 | # | Question | Suggested default | Your answer |
 | --- | --- | --- | --- |
@@ -254,7 +294,7 @@ Each API spec lands, with its OpenAPI change, before the matching UI spec (API W
 
 1. **Platform skeleton** (PLT-1 to PLT-10): runnable service, CI gates, Compose stack, health
    endpoint, empty OpenAPI spec published.
-2. **Users and auth** (USR-1 to USR-4).
+2. **Users and auth** (USR-1 to USR-4, CUR-1 to CUR-4).
 3. **Budget structure** (CAT-1 to CAT-5), since transactions reference categories.
 4. **Accounts and transactions** (ACC-1 to ACC-4, TXN-1 to TXN-3, TXN-6).
 5. **Budget months and assigning** (BUD-1 to BUD-6).

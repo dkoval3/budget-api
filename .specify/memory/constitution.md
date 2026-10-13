@@ -11,7 +11,8 @@ contract amends both constitutions.
 
 - Money MUST be an integer in the currency's minor unit in API payloads, stored as Postgres
   `BIGINT`. Floating-point values MUST NOT be used for money anywhere.
-- Each budget has a single currency, an ISO 4217 code sent to the UI as a user setting. The API
+- Each budget has a single currency, an ISO 4217 code sent to the UI as a budget setting
+  (returned with the user's settings). The API
   defines the allowed currencies and sends each with its decimal shift: the number of places the
   decimal point moves to turn a stored integer into the displayed amount (e.g. 2 for USD, where
   amounts are stored in cents). Clients MUST NOT assume a shift. Whether a budget's currency can
@@ -104,8 +105,10 @@ Converting calendar days, or depending on the server's clock and zone, breaks th
     - 503 when a dependency such as the database is temporarily unavailable or the API is shutting
       down, with `Retry-After` when known.
     - 502 or 504 when an external service fails or times out.
-- Reads MAY be retried automatically on 502, 503 and 504. Callers (the Next.js server and the browser) MUST NOT retry      
-  writes automatically
+- Reads MAY be retried automatically only on server errors (5xx). Reads MUST NOT be retried on
+  client errors (4xx), which a retry cannot fix. Callers MUST NOT retry writes automatically,
+  unless the endpoint is idempotent by design (e.g. user provisioning). The UI constitution applies
+  this rule to the browser and the Next.js server.
 - Input shape (required fields, lengths, `YYYY-MM-DD` and `YYYY-MM` formats, and so on) MUST be
   validated with Jakarta Bean Validation on the generated DTOs. Business rules are validated in
   the domain layer. Unknown JSON fields MUST be rejected.
@@ -126,7 +129,8 @@ spec as the source of truth, and testing against it, keeps both sides in step.
 - All request-path database access runs over R2DBC with `r2dbc-pool`. Spring Data R2DBC
   repositories are used for simple single-table CRUD. Aggregate queries (e.g. account balances
   and the per-category, per-month sums behind Amount to Assign) and performance-sensitive queries
-  use hand-written SQL through `DatabaseClient`, or `@Query` for simple cases. jOOQ over R2DBC is an allowed alternative if type-checked SQL becomes worth it.
+  use hand-written SQL through `DatabaseClient`, or `@Query` for simple cases. jOOQ over R2DBC is
+  an allowed alternative if type-checked SQL becomes worth it.
 - Transactions are declared with `@Transactional` on public service methods, or
   `TransactionalOperator` when only part of a pipeline should be transactional. Each user action
   MUST be one database transaction covering the change and the totals returned in the response.
@@ -155,16 +159,31 @@ financial data consistent through concurrent edits, retries and deploys.
 
 ### VI. Security and Privacy
 
-- The Next.js server is the API's only caller (backend-for-frontend). It forwards requests with
-  `Authorization: Bearer <access token>`. The API is not reachable from the browser, so it handles
-  no cookies, CSRF or CORS. CSRF protection is enforced by Next.js, which also maps the API's 401
-  to the browser redirect to `/login`, except a 401 with code `USER_NOT_PROVISIONED` (sign-up not
-  yet finished), which the UI shows as a "finishing setup, try again" message.
+- Every caller of the API is one of the kinds below. Adding a new caller requires an explicit
+  decision recorded in a feature spec.
+    - **User-facing callers** act for a signed-in user and send that user's Cognito access token
+      as `Authorization: Bearer <access token>`. The Next.js server (backend-for-frontend) is
+      currently the only one. The API takes the user's identity only from the token, never from a
+      request parameter.
+    - **Service callers** (e.g. the user-provisioning function, scheduled jobs) authenticate with
+      Cognito client-credentials tokens: one app client per caller, with a scope per task. They
+      call only internal endpoints that require their scope. Internal endpoints are not publicly
+      reachable and are described in a separate internal OpenAPI spec, not in the contract
+      published to the UI. A service token MUST NOT be accepted on user endpoints, and a user token
+      MUST NOT be accepted on internal endpoints.
+    - **Third parties** that cannot obtain Cognito tokens (e.g. bank-linking webhooks)
+      authenticate with the provider's own mechanism (e.g. signed requests), through a dedicated
+      entry point decided in that feature's spec.
+- The API is not reachable from the browser, so it handles no cookies, CSRF or CORS. CSRF
+  protection is enforced by Next.js, which also maps the API's 401 to the browser redirect to
+  `/login`, except a 401 with code `USER_NOT_PROVISIONED` (sign-up not yet finished), which the UI
+  shows as a "finishing setup, try again" message. Next.js MUST check that code before refreshing
+  tokens or redirecting, so it never loops on it.
 - Sessions are owned by the Next.js server (UI constitution §VI). The API never sees the session
   ID; it receives only the bearer token.
 - The API is a Spring Security WebFlux OAuth2 resource server. It MUST validate Cognito JWT access
-  tokens (issuer, client ID, expiry, `token_use=access`, and other claims as needed) against the
-  cached JWKS.
+  tokens (issuer, client ID, expiry, `token_use=access`, scopes for service callers, and other
+  claims as needed) against the cached JWKS.
 - The backend enforces authorization on every request. Every query MUST be scoped by the owning
   user (or budget) in the repository layer, enforced by ArchUnit and integration tests. A record
   belonging to another user returns 404.
@@ -236,6 +255,10 @@ keep reactive plumbing out of the rules that decide where money goes.
 - Amount to Assign: inflows categorized as "Ready to Assign" add to it; assignments in any month
   subtract from it; a category's available amount rolls into the next month; cash overspending in
   a category reduces the next month's Amount to Assign.
+- A transaction without a category counts as Ready to Assign until the user picks a category: an
+  uncategorized outflow reduces Amount to Assign and an uncategorized inflow adds to it.
+- Amount to Assign MAY go negative. The API accepts the writes that cause it and returns the
+  negative value as is; warning the user is the UI's responsibility.
 - Account types are Cash and Credit. Spending on a credit card moves money from the spending
   category to an automatic payment category for that card.
 - A transfer is a linked pair of transactions with no category. A split is one transaction whose
@@ -260,7 +283,8 @@ keeps the API, the UI and the shared fixtures in agreement.
 - `domain` packages MUST keep at least 85% coverage, enforced with JaCoCo in CI. There is no
   minimum elsewhere.
 - Integration tests against a real database MUST cover at least: every write (including its
-  returned totals), stale-version rejection, cross-user access returning 404, and pagination.
+  returned totals), stale-version rejection, cross-user access returning 404, and the page
+  object returned by list endpoints (real paging once it is introduced).
 - Sample data is used only in tests, a dev-only seed and a staging environment if one exists. It
   MUST NOT be present in production.
 - A Docker Compose stack (Postgres, the API, the Next.js UI, and a mock OIDC server standing in for
@@ -274,12 +298,13 @@ tests against real Postgres catch them before users do.
 
 ### X. Performance and Resilience
 
-- Sizing targets: 50 categories, 300 line items and 10k transactions per account. The budget
-  loads one month at a time; transaction lists are paged (cursor or date range), with a single
-  page containing everything as the default until performance is analyzed; totals are computed by
-  the API.
-- Latency targets at the sizing targets (p95): under 150 ms for a budget-month read, under 100 ms
-  for a transactions page, and under 150 ms for a write including recomputed totals.
+- The budget loads one month at a time; totals are computed by the API. Transaction lists are returned as
+  page objects, and a single page contains everything until paging is introduced. Whether and
+  when to page, its form (e.g. cursor or date range) and the threshold that triggers it are
+  decided later by a feature spec.
+- Latency targets (p95): under 150 ms for a budget-month read, under 100 ms for a transactions
+  page, and under 150 ms for a write including recomputed totals. The data volume they are
+  measured against is set by the spec that introduces the measurement.
 - Each query MUST be designed with its indexes and checked with `EXPLAIN` in review. Sums
   MUST be computed in SQL. Individual transactions or assignments MUST NOT be loaded into Java to
   total them; only the aggregated results are. Cached totals are allowed only as in
@@ -326,7 +351,7 @@ financial data the app exists to protect.
 - **Relationship to the UI constitution**: the UI constitution defines the contract the UI relies
   on; this constitution governs how the API fulfills it. A change to that contract (money in minor
   units and currency, computed totals, date formats, write responses, versions, generated types,
-  authorization, privacy, sample data, sizing, workflow and governance) amends both.
+  authorization, privacy, sample data, workflow and governance) amends both.
 - **Stack**: Java 25, Spring Boot 4.x (latest GA, Spring Framework 7), Spring WebFlux on Netty,
   Project Reactor, Spring Security (OAuth2 resource server), R2DBC with `r2dbc-pool`, PostgreSQL,
   Flyway, and Amazon Cognito (OIDC) for identity. Spring Boot minor versions are upgraded within a
@@ -371,5 +396,5 @@ financial data the app exists to protect.
 - Every plan's Constitution Check and every pre-merge self-review MUST verify compliance with these
   principles. Any deviation MUST be justified in the plan's Complexity Tracking table.
 
-**Version**: 1.0.0 | **Ratified**: TODO(RATIFICATION_DATE): set to the date the owner approves
-v1.0.0 | **Last Amended**: 2026-10-11
+**Version**: 1.0.0 | **Ratified**: 2026-10-12
+v1.0.0 | **Last Amended**: 2026-10-12
