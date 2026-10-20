@@ -88,6 +88,9 @@ Converting calendar days, or depending on the server's clock and zone, breaks th
 - The spec MUST be published as a versioned artifact (e.g. a GitHub release asset) on every merge
   to `main`. The UI pins a version and generates its API types and MSW mock types from it.
 - CI MUST fail on breaking spec changes (e.g. `oasdiff`) unless the major API version changes.
+  This applies from the first stable contract version (`1.0.0`, released with the MVP). Before
+  that, the contract is versioned `0.x`, carries no stability promise (as in semantic
+  versioning), and breaking changes do not block a merge.
 - Integration tests MUST validate every request and response against the spec (e.g.
   `swagger-request-validator`), so the API cannot drift from the UI's mocks.
 - URLs: `/api/v1/...`, plural resource nouns, kebab-case paths, camelCase JSON fields, and budget
@@ -207,9 +210,14 @@ financial data consistent through concurrent edits, retries and deploys.
   and read at startup, overridden by AWS AppConfig. Secrets come from environment variables or AWS
   Secrets Manager and MUST NOT be committed. Config is loaded into `@Validated`
   `@ConfigurationProperties` classes, and the API MUST refuse to start if a value is missing or
-  points at `localhost` outside development.
-- Startup validation MUST refuse a non-Cognito token issuer in every environment except the test
-  environment. There is no test-only auth bypass.
+  points at `localhost` outside the `local` and `test` environments. The one exception is a
+  sidecar: a helper container deployed next to the API and reached on `localhost` (e.g. a
+  telemetry collector). A sidecar endpoint MUST be declared as such in the committed
+  config, naming the setting and the reason. Any other `localhost` value still stops startup.
+- Startup validation MUST refuse a configured trusted token issuer that is not a Cognito issuer
+  in every environment except `local` and `test`, where a mock OIDC server stands in for Cognito
+  (Principle IX). Tokens from the mock server are still real, signed tokens validated the same
+  way; there is no test-only auth bypass.
 - Dependencies MUST be scanned for known vulnerabilities in CI on every pull request and on a
   schedule against `main`, failing on high or critical findings. The deployed Docker image is
   scanned too. Automated update PRs (e.g. Dependabot) keep dependencies current. Suppressing a
@@ -396,5 +404,4 @@ financial data the app exists to protect.
 - Every plan's Constitution Check and every pre-merge self-review MUST verify compliance with these
   principles. Any deviation MUST be justified in the plan's Complexity Tracking table.
 
-**Version**: 1.0.0 | **Ratified**: 2026-10-12
-v1.0.0 | **Last Amended**: 2026-10-12
+**Version**: 1.1.0 | **Ratified**: 2026-10-12 | **Last Amended**: 2026-10-18
