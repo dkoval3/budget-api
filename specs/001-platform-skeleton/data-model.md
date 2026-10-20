@@ -64,8 +64,7 @@ the owner role after Flyway). It is never a migration and never present in produ
 
 | Operation | Behavior proven | Spec |
 | --- | --- | --- |
-| `PUT /api/v1/test-widgets/{id}` (create with client ID) | Same ID + same owner → existing record (200); same ID, other owner → 409 `ID_CONFLICT`; new ID → 201 | FR-016, Story 5 #5 |
-| `POST /api/v1/test-widgets` (create, no ID) | Server generates UUID → 201 | FR-016 |
+| `POST /api/v1/test-widgets` (create, optional `id` in body) | No `id` → server generates a UUID → 201; new `id` → 201; `id` exists for the same owner → existing record, unchanged (200); `id` belongs to another owner → 409 `ID_CONFLICT` | FR-016, Story 5 #5 |
 | `GET /api/v1/test-widgets/{id}` | Own → 200; other user's or missing → 404 (identical body) | FR-017, Story 5 #3 |
 | `PATCH /api/v1/test-widgets/{id}` with `version` | Current version → 200 with `version + 1`; stale → 409 `STALE_VERSION`, row unchanged; other user's → 404 | FR-015, Story 5 #1–3 |
 | `DELETE /api/v1/test-widgets/{id}?version=` | Same version and ownership rules | FR-015, FR-017 |
@@ -110,9 +109,18 @@ The full mapping and headers are in [contracts/problem-codes.md](contracts/probl
 | `budgit.security.clock-skew` | duration | default 60 s, max 5 min |
 | `budgit.security.jwks-timeout` | duration | default 3 s |
 | `budgit.http.max-request-size` | data size | default 256 KB |
+| `budgit.sidecar-endpoints` | map: property name → reason | optional; each key names a setting allowed to point at `localhost` because a sidecar serves it; reason required (non-blank) |
 
 Spring-owned properties validated by the same rule set: R2DBC URL, Flyway URL, and OTLP
-endpoints. No host may be `localhost` or a loopback address outside `LOCAL`/`TEST`.
+endpoints. No host may be `localhost` or a loopback address outside `LOCAL`/`TEST`, except a
+setting listed in `budgit.sidecar-endpoints` (API §VI, constitution v1.1.0). Example, once the
+infrastructure spec adds a telemetry collector sidecar:
+
+```yaml
+budgit:
+  sidecar-endpoints:
+    management.opentelemetry.tracing.export.otlp.endpoint: "ADOT collector sidecar in the ECS task"
+```
 
 **Secrets** (environment variables or Secrets Manager, never committed): app-role DB password,
 owner-role DB password.

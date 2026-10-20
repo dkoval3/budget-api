@@ -19,9 +19,11 @@ The skeleton delivers:
 - shared owner-scoping, version-check and create-with-ID helpers, proven through a test-only
   record;
 - two database roles (owner for Flyway, app for requests);
-- validated per-environment config with AppConfig/Secrets Manager loaders;
+- validated per-environment config, with AppConfig and Secrets Manager imports through Spring
+  Cloud AWS;
 - JSON logs, OTel traces and metrics, and a log privacy test;
-- a Dockerfile, a Compose stack with a mock OIDC server and a guarded dev seed;
+- a Dockerfile, and a Compose stack with PostgreSQL 17, a mock OIDC server, the API, the UI
+  (once released) and a guarded dev seed;
 - GitHub Actions workflows for verify, image scan with E2E, contract publishing and scheduled
   scans.
 
@@ -39,7 +41,7 @@ AWS provisioning and deployment are deferred (spec, option C). Technical decisio
   migrations only), Validation, Actuator, OpenTelemetry starter (Micrometer Tracing OTel bridge,
   OTLP registry).
 - `openapi-generator-maven-plugin`.
-- AWS SDK v2 (`appconfigdata`; `secretsmanager` or Spring Cloud AWS, per spike R11).
+- Spring Cloud AWS 4.2.x: Secrets Manager and AppConfig starters (R11).
 - JSpecify.
 
 **Storage**: PostgreSQL 17, with schema `budgit`, roles `budgit_owner` (migrations) and
@@ -50,7 +52,8 @@ AWS provisioning and deployment are deferred (spec, option C). Technical decisio
 - JUnit 6, AssertJ, Reactor `StepVerifier`, `WebTestClient`.
 - Testcontainers (Postgres 17, mock-oauth2-server).
 - BlockHound (spike R15).
-- Contract validator `ExchangeFilterFunction` (spike R4).
+- Contract validation: `openapi-request-validator-core` 3.x behind an `ExchangeFilterFunction`
+  (R4).
 - ArchUnit, JaCoCo.
 - WireMock (AWS loader tests).
 
@@ -71,8 +74,8 @@ or EKS later (deferred).
 **Constraints**:
 
 - Non-blocking request path (API §II).
-- No `localhost` outside `local`/`test`; no non-Cognito issuer outside `local`/`test` (API §VI
-  v1.0.1).
+- No `localhost` outside `local`/`test` except declared sidecar endpoints; no non-Cognito issuer
+  outside `local`/`test` (API §VI v1.1.0).
 - No financial or personal data in logs, metrics or traces.
 - Docker is required to build (Testcontainers, lint and diff images).
 
@@ -86,10 +89,10 @@ or EKS later (deferred).
 | Principle | How this plan complies | Status |
 | --- | --- | --- |
 | **I. Financial Correctness** | No money handling yet. Problem bodies never contain financial data (R7). The `Money` record arrives with the first spec that needs it. | ✅ N/A for now |
-| **II. Non-Blocking I/O** | WebFlux/Netty, R2DBC, JDBC for Flyway only at startup. Security WebClient for JWKS has timeouts. AWS config loaders run once at startup, not on a request path, with timeouts (R11). BlockHound in ITs, or the decided fallback (R15). Request data in Reactor `Context` and baggage, no `ThreadLocal` (R8). | ✅ (spike R15) |
+| **II. Non-Blocking I/O** | WebFlux/Netty, R2DBC, JDBC for Flyway only at startup. Security WebClient for JWKS has timeouts. AWS config imports run once at startup, not on a request path (R11). BlockHound in ITs, or the decided fallback (R15). Request data in Reactor `Context` and baggage, no `ThreadLocal` (R8). | ✅ (spike R15) |
 | **III. Dates and Time** | Injected `Clock` bean; JWT clock-skew validation and `created_at`/`updated_at` use it. `timestamptz` UTC conventions recorded (data-model §2). | ✅ |
-| **IV. Contract-First API** | OpenAPI 3.1 in `src/main/resources/openapi/`, `spring`/`reactive`/`interfaceOnly` generator (R3). Published per merge (R6). oasdiff breaking check (R5). Request/response validation in ITs (R4). `/api/v1`, kebab-case. RFC 9457 with `code`, `errors`, `requestId` (R7). Status codes per §IV. Unknown JSON fields rejected. `Cache-Control: no-store` on every response (R8). | ✅ (spike R4) |
-| **V. Persistence** | R2DBC + `r2dbc-pool`; Flyway over a separate JDBC connection as the owner role (R13). Reusable `@Transactional` services (ArchUnit-enforced). UUID PKs with client-supplied create semantics. `version` with `WHERE version = ?` → 409 `STALE_VERSION`. Forward-only migrations. PostgreSQL 17 on RDS and Aurora (R1). | ✅ |
+| **IV. Contract-First API** | OpenAPI 3.1 in `src/main/resources/openapi/`, `spring`/`reactive`/`interfaceOnly` generator (R3). Published per merge (R6). oasdiff breaking check, blocking from contract `1.0.0` (R5, constitution v1.1.0). Request/response validation in ITs (R4). `/api/v1`, kebab-case. RFC 9457 with `code`, `errors`, `requestId` (R7). Status codes per §IV. Unknown JSON fields rejected. `Cache-Control: no-store` on every response (R8). | ✅ |
+| **V. Persistence** | R2DBC + `r2dbc-pool`; Flyway over a separate JDBC connection as the owner role (R13). Every database-touching service method is `@Transactional` (ArchUnit-enforced). Shared version-check and create-with-ID helpers in `persistence`. UUID PKs with client-supplied create semantics. `version` with `WHERE version = ?` → 409 `STALE_VERSION`. Forward-only migrations. PostgreSQL 17 on RDS and Aurora (R1). | ✅ |
 | **VI. Security and Privacy** | Two caller kinds on separate chains; service tokens rejected on `/api/**` and user tokens on `/internal/**` (R9). Separate internal contract, not published. JWT validation of issuer, `client_id`, expiry, `token_use`, scopes. Owner-scoped repositories enforced by ArchUnit; 404 for foreign records. RLS-ready roles and `user_id` on every table. Log privacy rules plus test. `@Validated` config; refuses `localhost` and a non-Cognito issuer outside `local`/`test`. No auth bypass. dependency-check plus Trivy plus Dependabot, with dated suppressions. | ✅ |
 | **VII. Code Organization** | `api`, `service`, `domain`, `persistence`, `config`, `common`, plus generated packages (R2). ArchUnit layering rules. DTOs stay out of the domain. Records, no Lombok/MapStruct. `@NullMarked` packages with NullAway. | ✅ |
 | **VIII. Budget Domain Rules** | Not touched. Sort-key and `user_id` conventions recorded for later tables. | ✅ N/A for now |
@@ -99,9 +102,10 @@ or EKS later (deferred).
 | **Scope / Tech constraints** | Java 25, Boot 4.1, Maven Wrapper, `spring-boot-starter-parent`. Docker image. Environments `local`, `test`, `production`. | ✅ |
 | **Workflow and gates** | `./mvnw verify` enforces tests, JaCoCo, ArchUnit, Spotless, Error Prone/NullAway, OpenAPI lint/breaking, dependency scan (R19). Pre-commit hook. Branch `001-platform-skeleton`. Conventional commits with `(001)` and task IDs. | ✅ |
 
-**Gate result (pre-research)**: PASS. No violations. Three compatibility spikes (R4, R11, R15)
-each have a decided fallback. Only the R15 fallback would be a deviation (BlockHound is named in
-API §II), and it would be recorded below if triggered.
+**Gate result (pre-research)**: PASS. No violations. One compatibility spike (R15) has a decided
+fallback. The R4 validator and the R11 Spring Cloud AWS imports are each proven by a first task.
+Only the R15 fallback would be a deviation (BlockHound is named in API §II), and it would be
+recorded below if triggered.
 
 **Gate result (post-design)**: PASS. The design artifacts introduce nothing beyond the table
 above. The test-only endpoint and table live entirely in `src/test` (R14), so no sample data
@@ -154,18 +158,17 @@ dependency-check-suppressions.xml        # suppressions with notes + until dates
 src/main/java/com/danekoval/budgit/
 ├── BudgitApplication.java
 ├── api/                                 # controllers (none yet), ProblemDetailsAdvice, error WebExceptionHandler
-│   └── filter/                          # RequestIdWebFilter, CacheControlWebFilter, ReadinessGateWebFilter
+│   └── filter/                          # RequestIdWebFilter, CacheControlWebFilter, ReadinessGateWebFilter,
+│   │                                    # RequestLoggingWebFilter
 ├── service/                             # (empty; package-info)
 ├── domain/                              # (empty; package-info)
 ├── persistence/                         # VersionedUpdates, IdempotentCreates, OwnerScoped support
 ├── config/                              # BudgitProperties, SafeForEnvironment validator, SecurityConfig,
-│   │                                    # ObservabilityConfig (MeterFilter allow-list), ClockConfig
-│   └── aws/                             # AppConfig (and fallback Secrets Manager) ConfigDataLoaders
+│                                        # ObservabilityConfig (MeterFilter allow-list), ClockConfig
 └── common/                              # UserId, BudgetId, RequestId, ProblemCode, platform exceptions,
                                          # @UnscopedQuery
 src/main/resources/
 ├── application.yaml, application-local.yaml, application-test.yaml, application-production.yaml
-├── META-INF/spring.factories             # ConfigDataLoader/LocationResolver registration
 ├── openapi/public/budgit-api.yaml        # ← contracts/budgit-api.yaml
 ├── openapi/internal/budgit-internal-api.yaml
 └── db/migration/V1__baseline.sql         # schema budgit, grants, default privileges
@@ -192,7 +195,7 @@ lives entirely under `src/test`.
 
 ## Implementation Notes for `/speckit-tasks`
 
-- **Order**: run spikes R4, R11 and R15 first. Then go build skeleton → gates →
+- **Order**: run spike R15, the R4 validator self-tests and the R11 import test first. Then go build skeleton → gates →
   error/headers → security → persistence helpers → observability → config → Docker/Compose →
   CI. Each phase writes its tests first (API §IX).
 - **SC-004 (every gate blocks a violation)**: needs one throwaway verification per gate. Do these

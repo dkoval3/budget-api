@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: BudgIT API
-  version: 1.0.0
+  version: 0.1.0
   description: |
     Public contract consumed by the BudgIT UI (Next.js server). Source of truth per API
     constitution §IV. The platform skeleton (feature 001) defines only shared components; business

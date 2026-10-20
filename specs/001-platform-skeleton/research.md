@@ -47,17 +47,32 @@ decided so a failed spike does not reopen the plan.
 - **Note**: the skeleton's contracts have no business paths, so generation yields only the shared
   models. That is expected.
 
-## R4. Contract validation in integration tests (FR-008) — **Spike**
+## R4. Contract validation in integration tests (FR-008)
 
-- **Decision**: try Atlassian `swagger-request-validator-core` (`OpenApiInteractionValidator`)
-  behind a small `ExchangeFilterFunction` registered on every `WebTestClient`, which validates
-  each request/response pair and fails the test on any report message at ERROR level.
-- **Spike**: the validator's OpenAPI 3.1 support is unconfirmed (open issue #326). The underlying
-  swagger-parser supports 3.1 from 2.1.0. Spike it against our 3.1 skeleton contract.
-- **Fallback (decided)**: the same `ExchangeFilterFunction`, implemented with `swagger-parser`
-  (to resolve the operation and its schemas, 3.1-aware) plus `networknt json-schema-validator`
-  (JSON Schema 2020-12, the dialect OpenAPI 3.1 uses). Also check: status code declared, content
-  type declared, required headers present.
+- **Decision**: Atlassian `com.atlassian.oai:openapi-request-validator-core` **3.x**
+  (`OpenApiInteractionValidator`), behind a small `ExchangeFilterFunction` registered on every
+  `WebTestClient`. The filter validates each request/response pair and fails the test on any
+  report message at ERROR level.
+- **Why it fits**: per the project's release notes, v3.0.0:
+  - adds full OpenAPI 3.1 validation, backed by JSON Schema 2020-12 (type unions, `const`,
+    `if/then/else`, `prefixItems`, `unevaluatedProperties` and more);
+  - targets Spring Framework 7 / Spring Boot 4 (Jakarta);
+  - requires Java 21+;
+  - renamed the artifacts from `swagger-request-validator-*` to `openapi-request-validator-*`
+    (the group ID is unchanged).
+
+  Beyond body schemas, it checks path matching, parameters, headers, content types and declared
+  status codes.
+- **Adapter**: no WebFlux/`WebTestClient` adapter module is listed, so the filter that converts
+  `WebTestClient` exchanges into the core library's request/response objects is our own (small)
+  code.
+- **Validator self-tests (first task)**: known-good and known-bad request/response pairs against
+  our 3.1 contract, including 3.1-specific constructs (e.g. a nullable field written as
+  `type: [string, "null"]`, `const`). They prove the validator catches what it should and does not
+  silently pass invalid responses.
+- **Fallback (if the self-tests fail)**: the same filter, implemented with `swagger-parser`
+  (operation and schema resolution, 3.1-aware) plus `networknt json-schema-validator` (JSON Schema
+  2020-12), checking status code, content type, required headers and body.
 - **Alternatives**: downgrading the contract to 3.0 (rejected: API §IV mandates 3.1).
 
 ## R5. Contract lint and breaking-change check (FR-010)
@@ -68,9 +83,12 @@ decided so a failed spike does not reopen the plan.
     plus rules: `operation-operationId`, kebab-case paths, `/api/v1` prefix on public paths,
     every operation declares the shared error responses).
   - **Breaking changes**: `oasdiff breaking --fail-on ERR` between the PR's public contract and
-    the baseline from `origin/main` (`git show origin/main:<path>`). The check is skipped, with
-    a log line, when there is no baseline (first PR) or when `info.version`'s major number
-    increased. A script in `scripts/openapi-breaking-check.sh` does this.
+    the baseline from `origin/main` (`git show origin/main:<path>`). A script in
+    `scripts/openapi-breaking-check.sh` does this. Each skip prints a log line:
+    - **No baseline** (first PR): skipped.
+    - **`info.version` below `1.0.0`** (pre-release, constitution v1.1.0): oasdiff still runs
+      and prints its report, but doesn't fail the build.
+    - **`info.version`'s major number increased**: skipped.
 - **Rationale**: API §IV names `oasdiff`. Redocly has the most complete 3.1 lint support. Running
   both through Docker avoids a Node toolchain in a Java build.
 - **Alternatives**: Spectral (also good, less 3.1-specific). OpenAPITools `openapi-diff` Maven
@@ -173,36 +191,52 @@ decided so a failed spike does not reopen the plan.
     active Spring profile.
   - A class-level `ConstraintValidator` (`@SafeForEnvironment`) applies the cross-field rules.
     Outside `LOCAL`/`TEST` it rejects any configured URL or host that resolves to
-    `localhost`/`127.0.0.0/8`/`::1`, and a trusted issuer not matching
+    `localhost`/`127.0.0.0/8`/`::1`, unless the property is listed in
+    `budgit.sidecar-endpoints` with a non-blank reason (a sidecar, API §VI v1.1.0). It also
+    rejects a trusted issuer not matching
     `^https://cognito-idp\.[a-z0-9-]+\.amazonaws\.com/[A-Za-z0-9-]+_[A-Za-z0-9]+$`.
   - The failure message names the property, never its value.
   - Boot's failure analyzer stops startup.
-- **Rationale**: this is exactly API §VI (as amended in v1.0.1) and keeps validation declarative.
+- **Rationale**: this is exactly API §VI (as amended in v1.1.0) and keeps validation declarative.
+  Declaring sidecars by property name, in committed config, keeps every allowed `localhost` visible
+  in review.
 - **Alternatives**: an `ApplicationRunner` check (runs too late; the server may already be
   listening).
 
-## R11. Remote config (AppConfig) and secrets (Secrets Manager) — **Spike**
+## R11. Remote config (AppConfig) and secrets (Secrets Manager)
 
-- **Decision**:
-  - **Secrets**: Spring Cloud AWS Secrets Manager config import
-    (`spring.config.import=optional:aws-secretsmanager:...`) in `application-production.yaml`
-    only, if a Spring Cloud AWS release supporting Boot 4 is available.
-  - **AppConfig**: a small custom `ConfigDataLocationResolver`/`ConfigDataLoader` for the
-    `aws-appconfig:` prefix using the AWS SDK v2 `AppConfigDataClient`
-    (`StartConfigurationSession` + `GetLatestConfiguration`, YAML profile). It is loaded at
-    startup after the committed file, so AppConfig values override it. Spring Cloud AWS has no
-    AppConfig integration. The loader is unit-tested against a WireMock endpoint override.
-- **Spike**: confirm Spring Cloud AWS has a Boot 4.1-compatible release. **Fallback (decided)**:
-  a second custom loader (`aws-secretsmanager:`) with the SDK v2 `SecretsManagerClient`, built
-  the same way as the AppConfig one.
+- **Decision**: Spring Cloud AWS **4.2.x** (`io.awspring.cloud:spring-cloud-aws-dependencies`
+  BOM) for both sources, imported through `spring.config.import` in
+  `application-production.yaml` only, with `optional:` so `local` and `test` need no AWS:
+  - **Secrets**: `spring-cloud-aws-starter-secrets-manager` (`aws-secretsmanager:` import).
+  - **AppConfig**: `spring-cloud-aws-starter-app-config` (AppConfig integration added in 4.1.0;
+    4.2.0 fixes token refresh). It is imported after the committed file, so AppConfig values
+    override it.
+- **Evidence** (awspring releases and README, checked 2026-10-18):
+  - The 4.x line is built for Spring Boot 4 and Spring Framework 7; 4.2.0 is the latest
+    release (Sep 2026).
+  - The README's compatibility table still lists only Boot 4.0.x, but 4.1.0 (Jul 2026, after
+    Boot 4.1's release) and later "lift Spring versions to latest".
+  - Secrets Manager and AppConfig are both listed as supported in 4.1.x.
+- **First task** (replaces the earlier spike): confirm the exact import prefixes in the 4.2
+  reference docs, and add an integration test that starts the app on Boot 4.1 with both imports
+  pointed at a WireMock endpoint override. A failure there means pinning a newer Spring Cloud
+  AWS patch, or as a last resort writing our own loaders on the AWS SDK v2 (`appconfigdata`,
+  `secretsmanager`).
+- **Upgrade risk**: Spring Cloud AWS releases a little after each Spring Boot minor. If it lags
+  long enough to block the constitution's "upgrade Boot minors within a month", the same
+  last-resort loaders apply.
 - **Blocking note**: config loading happens once, at startup, before the server accepts traffic.
   It is not a request path, so API §II's non-blocking rule does not apply. Each call still has a
   timeout (5 s).
 - **Not run anywhere yet**: production wiring is exercised only by tests and a production-shaped
   container start (spec Story 7 scenario 7). Real AWS comes with the deferred infrastructure spec.
-- **Alternatives**: the AppConfig Agent sidecar on `localhost:2772` (conflicts with the
-  "no localhost outside local/test" rule and needs a sidecar); environment variables only (does
-  not meet "overridden by AWS AppConfig").
+- **Alternatives**:
+  - The AppConfig Agent sidecar (`localhost:2772`): it adds a container to deploy and run, and
+    Spring Cloud AWS already reads AppConfig directly. Sidecars aren't ruled out for later needs.
+  - Our own loaders on the AWS SDK v2: more code to maintain, now that a supported library
+    covers both sources. They remain the last resort.
+  - Environment variables only: they don't meet "overridden by AWS AppConfig".
 
 ## R12. Mock OIDC provider and the issuer hostname
 
@@ -304,7 +338,18 @@ decided so a failed spike does not reopen the plan.
 - **Decision**:
   - **Logs**: Boot structured logging `logging.structured.format.console=ecs` to stdout only; no
     file appenders. Request/response body logging stays off (no `logging.level` for codecs or
-    wiretap).
+    wiretap). The startup banner is off (`spring.main.banner-mode=off`), since it isn't JSON.
+  - **Request completion log**: a `RequestLoggingWebFilter` writes one INFO line per request when
+    the response completes. Fields: `http.method`, `url.template` (the route pattern, never the
+    actual URL or query string), `http.status`, `duration.ms`, plus the usual `requestId` and
+    `trace.id`. It never logs headers or bodies.
+    - **Why our own filter:** it runs inside WebFlux's processing, while the request's context
+      is active, so the line carries `requestId` and `trace.id` as JSON fields.
+    - **Not Reactor Netty's built-in access log:** that log is written by Netty after WebFlux
+      has finished, so its lines have no `requestId` or `trace.id`, and its fields end up as a
+      string inside `message`.
+    - **Also used by checks:** every request then produces at least one line for the quickstart
+      check and the privacy test to inspect.
   - **Tracing**: Micrometer Tracing with the OpenTelemetry bridge and OTLP exporter (Boot 4.1
     OpenTelemetry starter). Export is disabled in `local`/`test` (traces still generated, so IDs
     exist) and points at an OTLP endpoint in `production` (the ADOT collector arrives with the
@@ -321,7 +366,8 @@ decided so a failed spike does not reopen the plan.
       amount like `987654321`, `SENTINEL-PAYEE-…`, an email, and the bearer token itself.
     - **Captured**: stdout (`OutputCaptureExtension`), finished spans (an in-memory OTel span
       exporter bean in tests), and meter tags (`SimpleMeterRegistry`).
-    - **Asserts**: no sentinel appears anywhere, and every log line parses as JSON and has
+    - **Asserts**: no sentinel appears anywhere; every captured line parses as JSON; and every
+      line logged while handling the test's requests (matched by the request IDs it sent) has
       `requestId` and `trace.id`.
 - **Rationale**: API §XI. ECS is a widely understood schema that CloudWatch Logs Insights handles
   well.
@@ -336,6 +382,13 @@ decided so a failed spike does not reopen the plan.
     `java -Djarmode=tools extract --layers --launcher` for layer caching; a non-root user;
     ports 8080 (app) and 8081 (management); `HEALTHCHECK` none (the orchestrator uses
     readiness).
+  - **JVM warnings:** plain-text warnings the JVM prints (e.g. about restricted native access or
+    deprecated options) are **not** suppressed. They signal things that may break on a future
+    Java upgrade.
+    - **Flags:** one that changes JVM behaviour (e.g. `--enable-native-access`) is added only as
+      a deliberate decision, with a comment saying why. It is never added to tidy logs.
+    - **Visibility:** the CI `image` job's production-shaped start prints any non-JSON startup
+      lines as a report, without failing the build, so a new warning is noticed.
 - **Not in the image**: `docker/`, `dev/seed/` and test resources (the dev seed cannot ship;
   FR-029).
 - **Rationale**: full control over base image, user and contents, and easy to scan.
@@ -420,9 +473,15 @@ decided so a failed spike does not reopen the plan.
   `application-{profile}.yaml` alongside a shared `application.yaml`.
   - **Integration tests**: activate `test` via `@ActiveProfiles("test")` and inject container
     URLs with `@DynamicPropertySource` / `@ServiceConnection`.
-  - **Production**: `application-production.yaml` has no hosts. Every connection value comes from
-    environment variables or Secrets Manager (`BUDGIT_DB_*`, `BUDGIT_SECURITY_ISSUER_URI`, and
-    so on), so a missing value fails validation (R10).
+  - **Production**: `application-production.yaml` holds the non-secret settings that are already
+    known. It doesn't contain connection hosts (database, issuer, telemetry) yet, because the
+    resources don't exist until the deferred infrastructure spec creates them.
+    - **Infrastructure spec decides:** whether hosts are then committed to this file or injected
+      from the infrastructure code's outputs (e.g. environment variables in the task definition).
+      The trade-off: committed values are visible and reviewed in Git; injected values keep the
+      infrastructure code as the single source of truth.
+    - **Either way:** secrets are never committed and come only from Secrets Manager or
+      environment variables (API §VI). A missing value fails startup validation (R10).
   - **Production-shaped smoke test** (CI `image` job, not `verify`): the built image runs with
     the `production` profile on a Docker network next to Postgres (alias `db`) and the mock OIDC
     server (alias `mock-oidc`). It is configured with:

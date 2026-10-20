@@ -11,6 +11,7 @@ stories. The behavior expected at each step is defined in
 - JDK 25 (e.g. Temurin or Homebrew `openjdk@25`) on `PATH`.
 - A Docker-compatible runtime with Compose v2 (Docker Desktop, OrbStack or Colima). Testcontainers
   and the Compose stack both need it.
+- `jq` for reading JSON in the checks below (`brew install jq`).
 - One-time `/etc/hosts` entry so the browser, containers and API agree on the token issuer
   (research R12):
 
@@ -121,28 +122,50 @@ These are proven by integration tests against test-only records (research R14):
 
 ```bash
 ./mvnw verify -Dit.test='LogPrivacyIT' -Dtest=NONE -Dsurefire.failIfNoSpecifiedTests=false
-docker compose logs api | head -5   # every line is JSON with requestId and trace.id
+curl -s -o /dev/null -H 'X-Request-Id: demo-123' localhost:8080/api/v1/anything
+docker compose logs --no-log-prefix api | grep demo-123 | jq .   # request's lines, each with requestId + trace.id
+docker compose logs --no-log-prefix api | grep -v '^{'            # lists non-JSON lines (e.g. JVM warnings) for review
 ```
 
 ## 7. Configuration safety (Story 7)
 
 ```bash
-# Production profile with a localhost database → refuses to start, names the property
+# Production profile with a localhost database → refuses to start
 docker compose run --rm -e SPRING_PROFILES_ACTIVE=production -e BUDGIT_ENVIRONMENT=PRODUCTION \
   -e BUDGIT_DB_HOST=localhost api
+
 # Production profile with the mock issuer → refuses to start (non-Cognito issuer)
+docker compose run --rm -e SPRING_PROFILES_ACTIVE=production -e BUDGIT_ENVIRONMENT=PRODUCTION \
+  -e BUDGIT_SECURITY_ISSUER_URI=http://mock-oidc:8090/budgit api
 ```
 
-**Expected**: the process exits non-zero, and the failure analysis names `budgit.*` properties
-without printing secret values. The full production-shaped success case runs in the CI `image`
-job (research R21).
+**Expected**: each container exits at startup without becoming ready. The error lists every
+setting that fails validation, never secret values. Because these commands don't supply a full
+production configuration, the list also includes other missing required settings, not just the
+one under test.
+
+The precise check, a valid production-shaped baseline that starts plus one-change-at-a-time
+failures, runs in the CI `image` job (research R21).
 
 ## 8. Dev seed (Story 1 #5)
 
 ```bash
-docker compose --profile seed run --rm seed                       # local: succeeds (no data yet)
-docker compose -f compose.yaml -f compose.ci.yaml --profile seed run --rm seed   # test: guard aborts
+# Local database: the seed runs (nothing to load yet)
+docker compose --profile seed run --rm seed
+
+# Guard check: a separate, brand-new database labelled `test` must refuse the seed
+docker compose -p budgit-ci -f compose.yaml -f compose.ci.yaml up -d --wait postgres
+docker compose -p budgit-ci -f compose.yaml -f compose.ci.yaml --profile seed run --rm seed
+docker compose -p budgit-ci down -v
 ```
+
+**Expected**: the local run finishes without errors. In the guard check, the seed stops with
+"Dev seed refused: database is not marked local" and loads nothing.
+
+**Why `-p budgit-ci`**: Docker reuses an existing database for the same project name, and the
+`local`/`test` label is written only when a database is first created. A separate project name
+guarantees a new database labelled `test`. `down -v` then deletes it. Your everyday local
+database is never touched.
 
 ## 9. CI and publishing (Stories 3–4)
 
@@ -153,10 +176,15 @@ One-time repository settings on GitHub:
 - **Secrets**: `NVD_API_KEY`.
 - **Workflow permissions**: `contents: write` for `publish-contract.yml` only.
 
-After the first merge to `main`, the releases page shows `contract-v1.0.<run>` with
-`budgit-api-1.0.<run>.yaml` and `shared-fixtures-1.0.<run>.tar.gz`. The YAML has no `/internal`
+After the first merge to `main`, the releases page shows `contract-v0.1.<run>` with
+`budgit-api-0.1.<run>.yaml` and `shared-fixtures-0.1.<run>.tar.gz`. The YAML has no `/internal`
 paths.
 
-To check that a breaking change is blocked, open a PR that removes a component schema still
-referenced elsewhere (or, once endpoints exist, a field). Expected result: `verify` fails at the
-oasdiff step unless `info.version`'s major number is bumped.
+To check the breaking-change gate, open a PR that removes a component schema still referenced
+elsewhere (or, once endpoints exist, a field):
+
+- **While the contract is `0.x`** (until the MVP release): `verify` passes, and the oasdiff step
+  prints the breaking change as a report only.
+- **To prove the gate blocks:** temporarily set `info.version` to `1.0.0` on both the branch and
+  the baseline (or test the script against two local files). `verify` then fails at the oasdiff
+  step unless the major number is bumped.

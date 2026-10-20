@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: BudgIT Internal API
-  version: 1.0.0
+  version: 0.1.0
   description: |
     Internal contract for service callers (API constitution §VI). NOT published to the UI and
     NOT reachable publicly. Every operation lives under `/internal/v1`, requires a Cognito

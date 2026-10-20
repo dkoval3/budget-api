@@ -24,6 +24,26 @@ Registry of stable `code` values in Problem Details bodies ([budgit-api.yaml](bu
 Added by the next spec (Users and auth): `USER_NOT_PROVISIONED` (401). It's returned only after a
 token has fully validated, and the UI treats it differently from `UNAUTHENTICATED`.
 
+## Create with a client-supplied ID
+
+Every resource has one create operation: `POST` to the collection (e.g. `POST /api/v1/accounts`),
+with an optional `id` (UUID) in the body. Without an `id`, the server generates one.
+
+`PUT` is not used for creates. Updates use `PATCH` to change some fields of a record, or `PUT` to
+replace a resource whose request body is the whole resource (e.g. a single value). Both carry the
+record's `version` and return `409 STALE_VERSION` when it is stale (API §V).
+
+Applies to every create endpoint (API §V, spec FR-016):
+
+| Situation | Response |
+| --- | --- |
+| No record with this ID exists | `201 Created`, body = the new record |
+| A record with this ID already exists for the same owner (e.g. a retry) | `200 OK`, body = the existing record, unchanged |
+| The ID belongs to a different record (e.g. another user's) | `409` Problem Details, code `ID_CONFLICT` |
+
+Clients can treat both `201` and `200` as success and use the returned body; the status tells them
+whether this request created the record.
+
 ## Headers on every response (application port)
 
 | Header | Value |

@@ -9,7 +9,7 @@
 **Input**: User description: "Read mvp-requirements.md - create the spec for the platform skeleton PLT-1 to PLT-10"
 
 **Source requirements**: `docs/mvp-requirements.md` §2.7 (PLT-1 to PLT-10) and §6 item 1; API
-constitution v1.0.0 (cited as "API §N").
+constitution v1.1.0 (cited as "API §N").
 
 ## Overview
 
@@ -124,8 +124,9 @@ version.
    by version.
 2. **Given** the published artifact, **When** its contents are inspected, **Then** it contains no
    internal (service-caller) endpoints.
-3. **Given** a pull request that makes a breaking change to the public contract without a major
-   version change, **When** the gates run, **Then** the merge is blocked.
+3. **Given** a contract at version `1.0.0` or later, **When** a pull request makes a breaking
+   change without a major version change, **Then** the merge is blocked; **and given** a
+   contract below `1.0.0`, **Then** the breaking change is reported but does not block.
 4. **Given** a pull request whose contract fails linting, **When** the gates run, **Then** the
    merge is blocked.
 5. **Given** an integration test sends a request or receives a response that does not match the
@@ -211,9 +212,9 @@ containing the request ID and trace ID.
 
 **Acceptance Scenarios**:
 
-1. **Given** any request, **When** it is handled, **Then** every log line is a single structured
-   JSON object on standard output carrying the request ID and trace ID (and the internal user ID
-   once users exist).
+1. **Given** any request, **When** it is handled, **Then** every log line written while handling
+   it is a single structured JSON object on standard output carrying that request's ID and trace
+   ID (and the internal user ID once users exist).
 2. **Given** a request whose headers or body contain amounts, account names, payees, memos, tokens
    or emails, **When** the log privacy test captures all output for that request, **Then** none of
    those values appear, and no request or response bodies are logged.
@@ -241,7 +242,9 @@ confirm health is green.
 1. **Given** any environment, **When** a required configuration value is missing or invalid,
    **Then** the service refuses to start and names the offending setting (never its secret value).
 2. **Given** any environment other than `local` and `test`, **When** a configured address points
-   at `localhost`, **Then** the service refuses to start.
+   at `localhost` and that setting is not declared as a sidecar endpoint, **Then** the service
+   refuses to start; **and given** the setting is declared as a sidecar endpoint with a reason,
+   **Then** the service starts.
 3. **Given** any environment other than `local` and `test`, **When** the configured trusted token
    issuer is not a Cognito issuer (e.g. it points at the mock OIDC server), **Then** the service
    refuses to start.
@@ -308,8 +311,10 @@ confirm health is green.
   contract and fail on any mismatch.
 - **FR-009**: On every merge to `main`, the public contract and the shared fixtures directory MUST
   be published as one uniquely versioned, downloadable artifact.
-- **FR-010**: The build MUST lint the contract and MUST fail on breaking changes to the public
-  contract unless its major API version changes.
+- **FR-010**: The build MUST lint the contract. From contract version `1.0.0` onward, it MUST
+  fail on breaking changes to the public contract unless the major version changes. Below
+  `1.0.0`, breaking changes MUST be reported but MUST NOT fail the build (API §IV, constitution
+  v1.1.0).
 
 **Errors and HTTP conventions (PLT-3)**
 
@@ -330,8 +335,13 @@ confirm health is green.
 - **FR-015**: The platform MUST provide a reusable optimistic version mechanism such that an update
   to a mutable record with a mismatched version is rejected with 409 code `STALE_VERSION` and
   leaves the record unchanged, and a successful update increments the version.
-- **FR-016**: The platform MUST provide reusable create-with-client-ID handling: repeating a create
-  with the same ID returns the existing record; an ID belonging to a different record returns 409.
+- **FR-016**: The platform MUST provide reusable create-with-client-ID handling:
+  - a create that inserts a new record returns `201 Created`;
+  - repeating a create with an ID that already exists for the same owner returns
+    `200 OK` with the existing record, unchanged;
+  - an ID belonging to a different record returns `409 ID_CONFLICT`.
+
+  Every create endpoint in later specs follows these status codes.
 
 **Ownership and security (PLT-5, auth foundation)**
 
@@ -354,15 +364,21 @@ confirm health is green.
   `production`), overridable at runtime by remote configuration in production; secrets MUST come
   only from environment variables or the secret store and MUST NOT be committed.
 - **FR-022**: All configuration MUST be validated at startup; the service MUST refuse to start if
-  a value is missing or invalid, if an address points at `localhost` outside `local` and `test`, or if the
+  a value is missing or invalid, if an address points at `localhost` outside `local` and `test`
+  (unless that setting is declared in committed config as a sidecar endpoint, with a reason), or if the
   configured trusted token issuer is not a Cognito issuer outside `local` and `test`. This is a
   check of configuration at startup, not of incoming tokens.
 
 **Observability (PLT-7)**
 
-- **FR-023**: The service MUST write structured JSON logs to standard output only, each line
-  carrying the request ID and trace ID (and internal user ID once users exist), propagated across
-  asynchronous boundaries.
+- **FR-023**: Every line written by the application's logging MUST be structured JSON on standard
+  output only. Output from the JVM itself (e.g. runtime warnings) may be plain text and MUST NOT be
+  suppressed just to keep the logs uniform.
+  Every line written while handling a request MUST carry that request's ID and trace ID (and the
+  internal user ID once users exist), propagated across asynchronous boundaries. Lines written
+  outside a request (startup, shutdown, scheduled work) may carry neither. Every request MUST
+  produce one INFO completion line with the HTTP method, the route template, the status and the
+  duration, and never the actual URL values, query string, headers or bodies.
 - **FR-024**: An automated test MUST verify that amounts, balances, payees, memos, account names or
   numbers, tokens, session IDs and emails never appear in log output, and that request and
   response bodies are never logged.
@@ -453,8 +469,9 @@ confirm health is green.
   provides token validation only.
 - The ownership (PLT-5) and version (PLT-4) mechanisms are proven with test-only records and
   migrations that exist only in the test scope, since no production tables exist yet.
-- The empty public contract is versioned starting at `1.0.0` with API path prefix `/api/v1`; each
-  published artifact gets a unique version (contract version plus a build identifier).
+- The empty public contract is versioned starting at `0.1.0` with API path prefix `/api/v1`; it
+  moves to `1.0.0` when the MVP is released, which turns on the blocking breaking-change check.
+  Each published artifact gets a unique version (contract version plus a build identifier).
 - The published artifact is a GitHub release asset in this repository, as suggested by API §IV.
 - The domain coverage threshold (85%) applies even though the `domain` package is nearly empty;
   the gate is configured now and becomes meaningful with the first domain logic.
